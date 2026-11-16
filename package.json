@@ -1,0 +1,35 @@
+{
+  "name": "@semantq/pay",
+  "version": "1.0.0",
+  "description": "Payment engine for Semantq \u2014 Stripe-first, webhook-driven, plug-and-play",
+  "main": "index.js",
+  "type": "module",
+  "author": "Gugulethu Nyoni",
+  "license": "ISC",
+  "keywords": [
+    "semantq",
+    "payments",
+    "stripe",
+    "checkout",
+    "webhooks"
+  ],
+  "semantq-module": true,
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "echo \"No build step specified\" && exit 0"
+  },
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "stripe": "^17.4.0",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "peerDependencies": {
+    "express": "^4.18.2"
+  }
+}
