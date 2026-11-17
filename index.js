@@ -1,13 +1,12 @@
-// packages/@semantq/blinque/index.js
+// packages/@semantq/pay/index.js
 //
-// @semantq/blinque — plug-and-play payment engine.
-// Stripe-first. Shipping deferred.
-// No monorepo-relative imports. Config is injected at init().
+// @semantq/pay — plug-and-play payment engine.
+// Stripe-first. Config injected at init(). No shipping, no logistics.
 
 import { StripeProvider } from './providers/gateways/stripe.js';
 import { CheckoutService } from './services/CheckoutService.js';
 
-class Blinque {
+class Pay {
   constructor() {
     this.config = null;
     this.paymentGateways = new Map();
@@ -20,33 +19,29 @@ class Blinque {
   async init(config, options = {}) {
     if (this._initialized) return this;
 
-    console.log('[Blinque] Initializing...');
+    console.log('[Pay] Initializing...');
 
     if (!config || typeof config !== 'object') {
-      throw new Error('[Blinque] init(config) requires a config object');
+      throw new Error('[Pay] init(config) requires a config object');
     }
 
-    const logistics = config.logistics;
-    if (!logistics || typeof logistics !== 'object') {
-      throw new Error('[Blinque] config.logistics is required');
+    const payments = config.payments;
+    if (!payments || typeof payments !== 'object') {
+      throw new Error('[Pay] config.payments is required');
     }
 
-    this.config = logistics;
+    this.config = payments;
     this.paymentEventHandler = options.paymentEventHandler || null;
 
-    if (logistics.shipping?.enabled === true) {
-      console.warn('[Blinque] Shipping enabled in config but provider not registered. Deferred.');
-    }
-
-    const providers = logistics.gateways?.providers || {};
+    const providers = payments.providers || {};
 
     if (providers.stripe?.enabled === true) {
       const cfg = providers.stripe.config || {};
       if (!cfg.secretKey) {
-        throw new Error('[Blinque] Stripe enabled but config.secretKey is missing');
+        throw new Error('[Pay] Stripe enabled but config.secretKey is missing');
       }
       if (!cfg.webhookSecret) {
-        throw new Error('[Blinque] Stripe enabled but config.webhookSecret is missing');
+        throw new Error('[Pay] Stripe enabled but config.webhookSecret is missing');
       }
 
       const stripeProvider = new StripeProvider(cfg);
@@ -55,22 +50,22 @@ class Blinque {
       this.paymentGateways.set('stripe', stripeCheckout);
       this.paymentProviders.set('stripe', stripeProvider);
 
-      console.log('[Blinque] Stripe gateway registered.');
+      console.log('[Pay] Stripe gateway registered.');
     }
 
     for (const name of ['yoco', 'paystack', 'paypal']) {
       if (providers[name]?.enabled === true) {
-        console.warn(`[Blinque] Provider '${name}' enabled in config but not implemented. Ignoring.`);
+        console.warn(`[Pay] Provider '${name}' enabled in config but not implemented. Ignoring.`);
       }
     }
 
     const defaultName = String(
-      logistics.gateways?.defaultProvider || 'stripe'
+      payments.defaultProvider || 'stripe'
     ).toLowerCase();
 
     if (!this.paymentGateways.has(defaultName)) {
       throw new Error(
-        `[Blinque] defaultProvider '${defaultName}' is not registered. ` +
+        `[Pay] defaultProvider '${defaultName}' is not registered. ` +
         `Registered: ${Array.from(this.paymentGateways.keys()).join(', ') || 'none'}`
       );
     }
@@ -78,13 +73,13 @@ class Blinque {
     this.defaultGateway = defaultName;
 
     if (this.paymentGateways.size === 0) {
-      throw new Error('[Blinque] No payment gateways registered.');
+      throw new Error('[Pay] No payment gateways registered.');
     }
 
     this._initialized = true;
 
     console.log(
-      `[Blinque] Ready. Default: ${this.defaultGateway}. ` +
+      `[Pay] Ready. Default: ${this.defaultGateway}. ` +
       `Available: ${Array.from(this.paymentGateways.keys()).join(', ')}. ` +
       `Event handler: ${this.paymentEventHandler ? 'registered' : 'not registered'}.`
     );
@@ -94,7 +89,7 @@ class Blinque {
 
   getPaymentGateway(gatewayName = null) {
     if (!this._initialized) {
-      throw new Error('[Blinque] Not initialized. Call await blinque.init(config) first.');
+      throw new Error('[Pay] Not initialized. Call await pay.init(config) first.');
     }
 
     const key = String(gatewayName || this.defaultGateway).toLowerCase();
@@ -102,7 +97,7 @@ class Blinque {
 
     if (!gateway) {
       throw new Error(
-        `[Blinque] Gateway '${key}' is not registered. ` +
+        `[Pay] Gateway '${key}' is not registered. ` +
         `Available: ${Array.from(this.paymentGateways.keys()).join(', ')}`
       );
     }
@@ -112,7 +107,7 @@ class Blinque {
 
   getPaymentProvider(gatewayName) {
     if (!this._initialized) {
-      throw new Error('[Blinque] Not initialized. Call await blinque.init(config) first.');
+      throw new Error('[Pay] Not initialized. Call await pay.init(config) first.');
     }
 
     const key = String(gatewayName).toLowerCase();
@@ -120,7 +115,7 @@ class Blinque {
 
     if (!provider) {
       throw new Error(
-        `[Blinque] Provider '${key}' is not registered. ` +
+        `[Pay] Provider '${key}' is not registered. ` +
         `Available: ${Array.from(this.paymentProviders.keys()).join(', ')}`
       );
     }
@@ -137,7 +132,7 @@ class Blinque {
   }
 }
 
-const blinque = new Blinque();
+const pay = new Pay();
 
-export { Blinque };
-export default blinque;
+export { Pay };
+export default pay;
