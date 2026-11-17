@@ -1,189 +1,273 @@
-import { BaseProvider } from '../../core/BaseProvider.js';
-import crypto from 'crypto';
+// packages/@semantq/pay/providers/gateways/stripe.js
+//
+// Stripe payment provider.
+// Uses the official Stripe SDK for checkout + webhook verification.
+// Event normalization maps Stripe events to SemantqPayPaymentStatus.
 
-export class Stripe extends BaseProvider {
+import Stripe from 'stripe';
+import { PaymentService } from '../../core/PaymentService.js';
+
+const STRIPE_EVENT_STATUS_MAP = {
+  'checkout.session.completed':         null,    // resolved by payment_status
+  'checkout.session.async_payment_succeeded': 'SUCCEEDED',
+  'checkout.session.async_payment_failed':    'FAILED',
+  'checkout.session.expired':                 'EXPIRED',
+  'payment_intent.succeeded':                 'SUCCEEDED',
+  'payment_intent.payment_failed':            'FAILED',
+  'payment_intent.canceled':                  'CANCELLED',
+  'charge.refunded':                          null,    // resolved by amount_refunded vs amount
+};
+
+export class StripeProvider extends PaymentService {
   constructor(credentials) {
     super();
+
+    if (!credentials?.secretKey) {
+      throw new Error('[Stripe] credentials.secretKey is required');
+    }
+    if (!credentials?.webhookSecret) {
+      throw new Error('[Stripe] credentials.webhookSecret is required');
+    }
+
     this.name = 'Stripe';
     this.secretKey = credentials.secretKey;
-    this.publicKey = credentials.publicKey;
-    this.baseUrl = 'https://api.stripe.com/v1';
+    this.publicKey = credentials.publicKey || null;
     this.webhookSecret = credentials.webhookSecret;
-    
-    const environment = this.secretKey?.startsWith('sk_live_') ? 'live' : 'test';
+
+    this.stripe = new Stripe(this.secretKey, {
+      apiVersion: '2024-11-20.acacia',
+      appInfo: {
+        name: '@semantq/pay',
+        version: '1.0.0',
+      },
+    });
+
+    const environment = this.secretKey.startsWith('sk_live_') ? 'live' : 'test';
     console.log(`[Stripe] Provider Active: ${environment} mode`);
   }
 
   /**
-   * Creates a Stripe Checkout Session.
-   * Stripe expects amount in cents/smallest currency unit.
+   * Create a Stripe Checkout Session.
+   *
+   * @param {Object} instruction — TrustedPaymentInstruction
+   * @param {string} instruction.paymentRecordId
+   * @param {number} instruction.amountMinor
+   * @param {string} instruction.currency          — lowercase ISO, e.g. 'zar'
+   * @param {string} [instruction.description]
+   * @param {string} [instruction.email]
+   * @param {string} instruction.successUrl
+   * @param {string} instruction.cancelUrl
+   * @param {Object} [instruction.metadata]
+   * @returns {Promise<{ checkoutId, redirectUrl, providerReference, providerPaymentIntent }>}
    */
-  async createCheckout(payload) {
-    const amountInCents = Math.round(parseFloat(payload.amount) * 100);
+  async createCheckout(instruction) {
+    if (!Number.isInteger(instruction.amountMinor) || instruction.amountMinor <= 0) {
+      throw new Error('[Stripe] amountMinor must be a positive integer');
+    }
+    if (!instruction.paymentRecordId) {
+      throw new Error('[Stripe] paymentRecordId is required');
+    }
+    if (!instruction.successUrl || !instruction.cancelUrl) {
+      throw new Error('[Stripe] successUrl and cancelUrl are required');
+    }
 
-    const params = new URLSearchParams();
-    params.append('payment_method_types[]', 'card');
-    params.append('mode', 'payment');
-    params.append('success_url', payload.successUrl);
-    params.append('cancel_url', payload.cancelUrl);
-    params.append('customer_email', payload.email);
-    params.append('client_reference_id', String(payload.paymentRecordId));
-    
-    params.append('line_items[0][price_data][currency]', payload.currency || 'zar');
-    params.append('line_items[0][price_data][product_data][name]', 'Subscription Payment');
-    params.append('line_items[0][price_data][unit_amount]', amountInCents);
-    params.append('line_items[0][quantity]', '1');
+    const currency = (instruction.currency || 'zar').toLowerCase();
 
-    // Pass metadata for webhook identification
-    params.append('metadata[paymentRecordId]', String(payload.paymentRecordId));
-    params.append('metadata[organizationId]', String(payload.metadata?.organizationId || ''));
-    params.append('metadata[pylon_gateway]', 'stripe');
+    const metadata = {
+      ...(instruction.metadata || {}),
+      paymentRecordId: String(instruction.paymentRecordId),
+      providerGateway: 'stripe',
+    };
 
-    Object.entries(payload.metadata || {}).forEach(([key, value]) => {
-      params.append(`metadata[${key}]`, String(value));
-    });
-
-    console.log('[Stripe] Creating checkout session:', {
-      amount: amountInCents,
-      currency: payload.currency || 'zar',
-      paymentRecordId: payload.paymentRecordId
-    });
-
-    const response = await this.request('/checkout/sessions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.secretKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
+    const session = await this.stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency,
+            unit_amount: instruction.amountMinor,
+            product_data: {
+              name: instruction.description || 'Payment',
+            },
+          },
+          quantity: 1,
+        },
+      ],
+      customer_email: instruction.email || undefined,
+      client_reference_id: String(instruction.paymentRecordId),
+      metadata,
+      payment_intent_data: {
+        metadata,
       },
-      body: params.toString()
+      success_url: instruction.successUrl,
+      cancel_url: instruction.cancelUrl,
+    });
+
+    console.log('[Stripe] Checkout session created', {
+      sessionId: session.id,
+      paymentRecordId: instruction.paymentRecordId,
+      amountMinor: instruction.amountMinor,
+      currency,
     });
 
     return {
-      checkoutId: response.id,
-      redirectUrl: response.url,
-      status: 'pending',
-      providerReference: response.id
+      checkoutId: session.id,
+      redirectUrl: session.url,
+      providerReference: session.id,
+      providerPaymentIntent: typeof session.payment_intent === 'string'
+        ? session.payment_intent
+        : session.payment_intent?.id || null,
     };
   }
 
   /**
-   * Webhook Signature Verification
-   * Stripe uses HMAC SHA256 with the webhook signing secret.
-   * Signature format: t=timestamp,v1=sig1,v0=sig0
+   * Server-side verification of a checkout session.
+   *
+   * @param {string} sessionId
+   * @returns {Promise<{ status: string, amountMinor: number, currency: string }>}
    */
-  verifyWebhook(rawBody, signatureHeader) {
-    if (!signatureHeader || !this.webhookSecret) {
-      console.log('[Stripe] Missing signature header or webhook secret');
-      return false;
+  async verifyPayment(sessionId) {
+    const session = await this.stripe.checkout.sessions.retrieve(sessionId);
+
+    let status = 'PENDING';
+    if (session.payment_status === 'paid') {
+      status = 'SUCCEEDED';
+    } else if (session.payment_status === 'unpaid') {
+      if (session.status === 'expired') status = 'EXPIRED';
+      else if (session.status === 'complete') status = 'PROCESSING';
     }
-
-    console.log('[Stripe Debug] Signature header:', signatureHeader);
-    console.log('[Stripe Debug] Webhook secret (first 10 chars):', this.webhookSecret.substring(0, 10));
-    console.log('[Stripe Debug] Raw body:', rawBody);
-
-    try {
-      const parts = signatureHeader.split(',');
-      const timestamp = parts.find(p => p.startsWith('t='))?.split('=')[1];
-      const signatures = parts
-        .filter(p => p.startsWith('v1='))
-        .map(p => p.split('=')[1]);
-
-      console.log('[Stripe Debug] Timestamp:', timestamp);
-      console.log('[Stripe Debug] Signatures found:', signatures.length);
-
-      if (!timestamp || signatures.length === 0) {
-        console.log('[Stripe] Missing timestamp or signatures');
-        return false;
-      }
-
-      const signedPayload = `${timestamp}.${rawBody}`;
-      
-      for (const signature of signatures) {
-        const expectedSignature = crypto
-          .createHmac('sha256', this.webhookSecret)
-          .update(signedPayload)
-          .digest('hex');
-
-        console.log('[Stripe Debug] Expected:', expectedSignature.substring(0, 20));
-        console.log('[Stripe Debug] Received:', signature.substring(0, 20));
-
-        if (expectedSignature === signature) {
-          console.log('[Stripe] Signature verified');
-          return true;
-        }
-      }
-
-      console.log('[Stripe] Signature mismatch');
-      return false;
-    } catch (error) {
-      console.error('[Stripe] Webhook Verification Failed:', error.message);
-      return false;
-    }
-  }
-
-  /**
-   * Normalizes Stripe's payload into the Semantq Standard format
-   */
-  normalizeEvent(payload) {
-    const { type, data } = payload;
-
-    const statusMap = {
-      'checkout.session.completed': 'PAID',
-      'checkout.session.expired': 'FAILED',
-      'payment_intent.payment_failed': 'FAILED',
-      'payment_intent.succeeded': 'PAID'
-    };
-
-    // Extract paymentRecordId from metadata
-    const paymentRecordId = data?.object?.metadata?.paymentRecordId 
-      || data?.object?.client_reference_id;
-
-    const amount = data?.object?.amount_total 
-      ? data.object.amount_total / 100 
-      : (data?.object?.amount || 0) / 100;
 
     return {
-      paymentRecordId: paymentRecordId,
-      status: statusMap[type] || 'PROCESSING',
-      amount: amount,
-      currency: data?.object?.currency || 'zar',
-      gatewayReference: data?.object?.id || data.id,
-      pylon_gateway: 'stripe'
+      status,
+      amountMinor: session.amount_total || 0,
+      currency: (session.currency || 'zar').toLowerCase(),
     };
   }
 
   /**
-   * Internal Request Wrapper
+   * Verify a Stripe webhook signature.
+   * Uses the official SDK's constructEvent — constant-time comparison,
+   * timestamp tolerance, all edge cases handled.
+   *
+   * @param {Buffer} rawBody
+   * @param {Object} headers
+   * @returns {Object} parsed Stripe event
+   * @throws Error with code 'INVALID_SIGNATURE' on failure
    */
-  async request(url, options = {}) {
-    const fullUrl = url.startsWith('http') ? url : `${this.baseUrl}${url}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+  verifyWebhook(rawBody, headers) {
+    const signature = headers['stripe-signature'];
+
+    if (!signature) {
+      const err = new Error('[Stripe] Missing stripe-signature header');
+      err.code = 'INVALID_SIGNATURE';
+      throw err;
+    }
+
+    if (!Buffer.isBuffer(rawBody)) {
+      const err = new Error('[Stripe] rawBody must be a Buffer');
+      err.code = 'INVALID_SIGNATURE';
+      throw err;
+    }
 
     try {
-      const response = await fetch(fullUrl, {
-        ...options,
-        signal: controller.signal
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error?.message || 'Stripe request failed');
-      }
-
-      return data;
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        throw new Error('Stripe API Timeout (30s)');
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
+      return this.stripe.webhooks.constructEvent(
+        rawBody,
+        signature,
+        this.webhookSecret,
+      );
+    } catch (verifyErr) {
+      const err = new Error(`[Stripe] Webhook verification failed: ${verifyErr.message}`);
+      err.code = 'INVALID_SIGNATURE';
+      throw err;
     }
+  }
+
+  /**
+   * Normalize a Stripe event to the canonical Semantq Pay payment event.
+   *
+   * @param {Object} event — result of verifyWebhook
+   * @returns {Object}
+   */
+  normalizeEvent(event) {
+    const type = event.type;
+    const object = event.data?.object || {};
+
+    // Resolve status from event type
+    let status = STRIPE_EVENT_STATUS_MAP[type];
+
+    // Special case: checkout.session.completed — status depends on payment_status
+    if (type === 'checkout.session.completed') {
+      if (object.payment_status === 'paid') {
+        status = 'SUCCEEDED';
+      } else if (object.payment_status === 'unpaid') {
+        status = 'PROCESSING';   // async payment in flight
+      } else {
+        status = 'PROCESSING';
+      }
+    }
+
+    // Special case: charge.refunded — full vs partial
+    if (type === 'charge.refunded') {
+      const refunded = object.amount_refunded || 0;
+      const total = object.amount || 0;
+      status = refunded >= total ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+    }
+
+    if (!status) {
+      const err = new Error(`[Stripe] Unsupported event type: ${type}`);
+      err.code = 'UNSUPPORTED_EVENT';
+      throw err;
+    }
+
+    // Extract paymentRecordId from metadata or client_reference_id
+    const metadata = object.metadata || {};
+    const paymentRecordId =
+      metadata.paymentRecordId ||
+      object.client_reference_id ||
+      null;
+
+    if (!paymentRecordId) {
+      const err = new Error(`[Stripe] Cannot resolve paymentRecordId from event ${type}`);
+      err.code = 'UNSUPPORTED_EVENT';
+      throw err;
+    }
+
+    // Amount — checkout sessions use amount_total; payment_intents use amount;
+    // charges use amount. Always integer minor units.
+    let amountMinor = 0;
+    if (typeof object.amount_total === 'number') amountMinor = object.amount_total;
+    else if (typeof object.amount === 'number') amountMinor = object.amount;
+    else if (typeof object.amount_received === 'number') amountMinor = object.amount_received;
+
+    const currency = (object.currency || 'zar').toLowerCase();
+
+    const providerReference =
+      object.id ||
+      (typeof object.payment_intent === 'string' ? object.payment_intent : object.payment_intent?.id) ||
+      null;
+
+    const providerPaymentIntent =
+      typeof object.payment_intent === 'string'
+        ? object.payment_intent
+        : object.payment_intent?.id ||
+          (type.startsWith('payment_intent') ? object.id : null);
+
+    return {
+      paymentRecordId: String(paymentRecordId),
+      status,
+      amountMinor,
+      currency,
+      providerGateway: 'stripe',
+      providerReference,
+      providerPaymentIntent,
+      providerCreatedAt: event.created ? new Date(event.created * 1000) : new Date(),
+      providerEventId: event.id,
+      eventType: type,
+      raw: event,
+    };
   }
 }
 
-// Temporary alias — Phase 1.2 renames the class to StripeProvider.
-// Remove this line when Phase 1.2 lands.
-export { Stripe as StripeProvider };
+// Temporary alias — keeps old imports working until index.js is updated in later phases
+export { StripeProvider as Stripe };
