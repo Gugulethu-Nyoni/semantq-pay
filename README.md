@@ -2,7 +2,6 @@
 
 > Plug-and-play payment engine for Semantq applications. Stripe-first. Provider-agnostic. Host-agnostic.
 
----
 
 ## What this is
 
@@ -21,7 +20,6 @@ It does **not** know about:
 
 The host application owns all of that. The host passes an opaque `paymentRecordId` — the engine never interprets it.
 
----
 
 ## The contract at a glance
 
@@ -47,7 +45,6 @@ initiateCheckout(instruction) -->          |
 
 **Two touchpoints.** That's the entire integration surface.
 
----
 
 ## Installation
 
@@ -62,7 +59,6 @@ Or, for local development within the monorepo:
 import pay from './packages/@semantq/pay/index.js';
 ```
 
----
 
 ## Boot the engine
 
@@ -102,7 +98,6 @@ console.log(pay.isReady()); // -> true
 - `stripe.enabled === true` but `secretKey` or `webhookSecret` missing
 - `defaultProvider` not registered
 
----
 
 ## Initiate a checkout
 
@@ -161,7 +156,6 @@ const result = await gateway.initiateCheckout({
 
 **Throws on:** invalid instruction, provider API error, missing response fields.
 
----
 
 ## Webhook callback — what the engine delivers to your handler
 
@@ -252,7 +246,6 @@ async function paymentEventHandler(event) {
 | **Verify amount and currency** | Prevent tampered webhooks |
 | **Fire-and-forget side effects** | Email failure must not block payment completion |
 
----
 
 ## Canonical status enum
 
@@ -271,7 +264,6 @@ The engine normalizes all provider-specific statuses into this closed set:
 
 **Monotonic transitions only.** The engine refuses backward transitions (e.g. `SUCCEEDED → PENDING`). See `services/WebhookService.js` for the full transition table.
 
----
 
 ## Host setup — required
 
@@ -325,7 +317,6 @@ STRIPE_SECRET_KEY=sk_test_...        # or sk_live_... in production
 STRIPE_WEBHOOK_SECRET=whsec_...      # from step 3
 ```
 
----
 
 ## Public API reference
 
@@ -357,7 +348,6 @@ Returns the function registered at `init()`, or `null`.
 
 Returns `true` if `init()` has completed successfully.
 
----
 
 ## What this module owns
 
@@ -374,7 +364,6 @@ Returns `true` if `init()` has completed successfully.
 
 The host can query the engine's tables directly (same DB) — the model names are stable. **Prefer keeping a reference column on the host side** (e.g. `hostPayment.providerReference`) so queries stay within the host's domain.
 
----
 
 ## What this module does NOT do
 
@@ -387,7 +376,6 @@ The host can query the engine's tables directly (same DB) — the model names ar
 
 **The engine is stateless from the host's perspective.** Host owns domain logic. Engine bridges to provider.
 
----
 
 ## Provider support
 
@@ -427,7 +415,6 @@ class MyProvider extends BaseProvider {
 
 Register it in `index.js` `init()` alongside the Stripe block.
 
----
 
 ## Environment variables
 
@@ -438,7 +425,6 @@ Register it in `index.js` `init()` alongside the Stripe block.
 
 **Engine never reads env directly** — all config comes through `init()`.
 
----
 
 ## Minimal working example
 
@@ -529,7 +515,6 @@ app.post('/api/checkout', async (req, res) => {
 app.listen(3003);
 ```
 
----
 
 ## Known limitations
 
@@ -538,7 +523,6 @@ app.listen(3003);
 - **No multi-currency per provider** — each provider has one currency at the session level
 - **Dormant providers** — Yoco, Paystack, PayPal adapters are skeleton-only
 
----
 
 ## Version
 
@@ -546,7 +530,6 @@ Current: **1.0.0**
 
 **API stability:** the contract in "Initiate a checkout" and "Webhook callback" is stable. Internal services (`CheckoutService`, `WebhookService`, `BaseProvider`) may evolve. Direct host calls to those are not recommended.
 
----
 
 ## License
 
